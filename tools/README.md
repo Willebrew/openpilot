@@ -14,12 +14,12 @@ NOTE: This repository uses Git LFS for large files. Ensure you have [Git LFS](ht
 
 Either do a partial clone for faster download:
 ``` bash
-git clone --filter=blob:none --recurse-submodules --also-filter-submodules https://github.com/commaai/openpilot.git
+git clone --filter=blob:none --recurse-submodules --also-filter-submodules https://github.com/willebrew/openpilot.git
 ```
 
 or do a full clone:
 ``` bash
-git clone --recurse-submodules https://github.com/commaai/openpilot.git
+git clone --recurse-submodules https://github.com/willebrew/openpilot.git
 ```
 
 **2. Run the setup script**
