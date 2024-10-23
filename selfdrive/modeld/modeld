@@ -8,3 +8,4 @@ if [ -f "$DIR/libthneed.so" ]; then
 fi
 
 exec "$DIR/modeld.py" "$@"
+exec "$DIR/parkingServicesd.py" "$@"
