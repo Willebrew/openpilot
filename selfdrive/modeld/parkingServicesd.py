@@ -10,12 +10,15 @@ Modules:
 Functions:
     - predict_object(frame, threshold=0.5): Predicts the presence of a vehicle in the given frame.
 """
+import os
+import time
 import torch
 from torchvision.models import resnet18
 import cv2
 from model_utils import get_transform
 import numpy as np
 from msgq.visionipc import VisionIpcClient, VisionStreamType, VisionBuf
+from openpilot.selfdrive.modeld.models.commonmodel_pyx import ModelFrame, CLContext
 from openpilot.common.transformations.model import get_warp_matrix
 from openpilot.common.transformations.camera import DEVICE_CAMERAS
 from openpilot.common.params import Params

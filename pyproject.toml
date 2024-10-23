@@ -65,6 +65,11 @@ dependencies = [
 
   # logreader
   "zstandard",
+
+  # needed for the new parkingServices detection (run "uv sync" to update packages)
+  "torch",
+  "torchvision",
+  "opencv-python",
 ]
 
 [project.optional-dependencies]
