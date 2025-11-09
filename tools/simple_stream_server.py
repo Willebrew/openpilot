@@ -151,11 +151,6 @@ def stream_mjpeg(camera_name, port, quality, target_fps):
                     frame_header = (
                         b"--frame\r\n"
                         b"Content-Type: image/jpeg\r\n"
-                        f"Content-Length: {len(jpeg_bytes)}\r\n"
-                        b"\r\n"
-                    ).encode() if isinstance(b"", bytes) else (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n"
                         b"Content-Length: " + str(len(jpeg_bytes)).encode() + b"\r\n"
                         b"\r\n"
                     )
