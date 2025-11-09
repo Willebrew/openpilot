@@ -37,9 +37,11 @@ def yuv_to_bgr(buf):
     h, w = buf.height, buf.width
 
     # NV12 format: full Y plane, then interleaved UV at half resolution
-    # Extract Y plane - accounting for stride
+    # Extract Y plane - accounting for stride and padding
     y_plane = np.frombuffer(buf.data, dtype=np.uint8, count=buf.uv_offset)
-    y = y_plane.reshape((h, buf.stride))[:, :w].copy()
+    # Calculate actual rows (may include padding rows)
+    y_rows = len(y_plane) // buf.stride
+    y = y_plane.reshape((y_rows, buf.stride))[:h, :w].copy()
 
     # Extract UV plane - accounting for stride
     # UV is interleaved (UVUVUV...) at half resolution
