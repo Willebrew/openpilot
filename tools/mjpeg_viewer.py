@@ -20,39 +20,48 @@ import threading
 from io import BytesIO
 
 
-# Camera intrinsics (from openpilot hardware config)
+# Camera intrinsics (from openpilot/common/transformations/camera.py)
+# These are the exact values used by openpilot
 CAMERA_CONFIGS = {
     'road': {
-        'focal_mm': 8.0,
+        'focal_length': 2648.0,  # pixels (not mm!)
         'width': 1928,
         'height': 1208,
-        'pixel_size_mm': 0.003,
     },
     'wide': {
-        'focal_mm': 1.71,
+        'focal_length': 567.0,  # pixels
         'width': 1928,
         'height': 1208,
-        'pixel_size_mm': 0.003,
     },
     'driver': {
-        'focal_mm': 1.71,
+        'focal_length': 567.0,  # pixels
         'width': 1928,
         'height': 1208,
-        'pixel_size_mm': 0.003,
     }
 }
 
+# Frame transformation matrix (from openpilot/common/transformations/camera.py)
+# device frame: x->forward, y->right, z->down
+# view frame: x->right, y->down, z->forward
+VIEW_FRAME_FROM_DEVICE_FRAME = np.array([
+    [0.,  1.,  0.],
+    [0.,  0.,  1.],
+    [1.,  0.,  0.]
+])
+
 
 def get_camera_intrinsics(camera_name):
-    """Calculate camera intrinsic matrix"""
+    """Get camera intrinsic matrix (same as openpilot)"""
     cfg = CAMERA_CONFIGS[camera_name]
-    focal_px = cfg['focal_mm'] / cfg['pixel_size_mm']
+    focal_length = cfg['focal_length']
+    width = cfg['width']
+    height = cfg['height']
 
-    # Intrinsic matrix K
+    # Intrinsic matrix K (camera_frame_from_view_frame)
     K = np.array([
-        [focal_px,     0.0, cfg['width'] / 2.0],
-        [0.0,     focal_px, cfg['height'] / 2.0],
-        [0.0,          0.0, 1.0]
+        [focal_length, 0.0, width / 2.0],
+        [0.0, focal_length, height / 2.0],
+        [0.0, 0.0, 1.0]
     ])
     return K
 
@@ -87,51 +96,106 @@ def get_calibration_rotation(rpy):
     return Rz @ Ry @ Rx
 
 
-def project_points_to_screen(points_3d, K, R, img_width, img_height):
+def calculate_transform(camera_name, rpy_calib, img_width, img_height):
     """
-    Project 3D points in car space to 2D screen coordinates
+    Calculate the full transformation matrix from device frame to screen coordinates.
+    This replicates openpilot's augmented_road_view.py transformation pipeline.
 
-    points_3d: Nx3 array of (x, y, z) in car frame (x=forward, y=right, z=down)
-    K: 3x3 camera intrinsic matrix
-    R: 3x3 calibration rotation matrix
+    Returns: 3x3 transformation matrix
+    """
+    # Get camera intrinsics
+    intrinsic = get_camera_intrinsics(camera_name)
+    cx = intrinsic[0, 2]
+    cy = intrinsic[1, 2]
+
+    # Get calibration rotation (device_from_calib)
+    device_from_calib = get_calibration_rotation(rpy_calib)
+
+    # Calculate view_from_calib (from augmented_road_view.py line 154)
+    view_from_calib = VIEW_FRAME_FROM_DEVICE_FRAME @ device_from_calib
+
+    # Calculate calib_transform (from augmented_road_view.py line 180)
+    calib_transform = intrinsic @ view_from_calib
+
+    # Calculate zoom (wide camera uses 2.0x zoom, road uses 1.1x)
+    zoom = 2.0 if camera_name == 'wide' else 1.1
+
+    # For simplicity, we don't calculate vanishing point offsets here
+    # (would need to project infinity point like augmented_road_view.py does)
+    # Just use centered view
+    x_offset = 0.0
+    y_offset = 0.0
+
+    # Calculate video transform (from augmented_road_view.py lines 211-215)
+    x = 0  # Content rect origin (no border in our viewer)
+    y = 0
+    w = img_width
+    h = img_height
+
+    video_transform = np.array([
+        [zoom, 0.0, (w / 2 + x - x_offset) - (cx * zoom)],
+        [0.0, zoom, (h / 2 + y - y_offset) - (cy * zoom)],
+        [0.0, 0.0, 1.0]
+    ])
+
+    # Final transform (from augmented_road_view.py line 216)
+    final_transform = video_transform @ calib_transform
+
+    return final_transform
+
+
+def project_points_to_screen(points_3d, transform, img_width, img_height):
+    """
+    Project 3D points in device frame to 2D screen coordinates using openpilot's exact method.
+    This replicates model_renderer.py _map_to_screen() function.
+
+    points_3d: Nx3 array of (x, y, z) in device frame (x=forward, y=right, z=down)
+    transform: 3x3 transformation matrix from calculate_transform()
 
     Returns: Nx2 array of (u, v) pixel coordinates
     """
     if len(points_3d) == 0:
         return np.array([])
 
-    # Transform to camera frame
-    points_cam = (R @ points_3d.T).T
+    # Transform points (model_renderer.py line 322)
+    # pt = self._car_space_transform @ input_pt
+    points_transformed = (transform @ points_3d.T).T  # Shape: Nx3
 
-    # Filter out points behind camera (negative z in camera frame)
-    valid_mask = points_cam[:, 2] > 0.1
+    # Filter out points with invalid z (behind camera or too close)
+    valid_mask = np.abs(points_transformed[:, 2]) >= 1e-6
 
     if not valid_mask.any():
         return np.array([])
 
-    # Project to image plane using intrinsics
-    points_homog = (K @ points_cam.T).T
+    points_transformed = points_transformed[valid_mask]
 
-    # Normalize by z coordinate
-    points_2d = points_homog[:, :2] / points_homog[:, [2]]
+    # Perspective division (model_renderer.py line 327)
+    # x, y = pt[0] / pt[2], pt[1] / pt[2]
+    points_2d = points_transformed[:, :2] / points_transformed[:, [2]]
 
-    # Filter points outside image bounds
-    valid_mask &= (points_2d[:, 0] >= 0) & (points_2d[:, 0] < img_width)
-    valid_mask &= (points_2d[:, 1] >= 0) & (points_2d[:, 1] < img_height)
+    # Filter points outside reasonable screen bounds (with margin like openpilot does)
+    margin = 500  # CLIP_MARGIN from model_renderer.py
+    valid_screen = (
+        (points_2d[:, 0] >= -margin) & (points_2d[:, 0] < img_width + margin) &
+        (points_2d[:, 1] >= -margin) & (points_2d[:, 1] < img_height + margin)
+    )
 
-    return points_2d[valid_mask].astype(np.int32) if valid_mask.any() else np.array([])
+    if not valid_screen.any():
+        return np.array([])
+
+    return points_2d[valid_screen].astype(np.int32)
 
 
-def draw_path(frame, path, K, R, color=(0, 255, 0), thickness=2):
+def draw_path(frame, path, transform, color=(0, 255, 0), thickness=2):
     """Draw vehicle path overlay"""
     if not path or 'x' not in path:
         return
 
-    # Convert path to 3D points
+    # Convert path to 3D points in device frame
     points_3d = np.column_stack([path['x'], path['y'], path['z']])
 
     # Project to screen
-    points_2d = project_points_to_screen(points_3d, K, R, frame.shape[1], frame.shape[0])
+    points_2d = project_points_to_screen(points_3d, transform, frame.shape[1], frame.shape[0])
 
     if len(points_2d) > 1:
         # Draw path as polyline with gradient
@@ -142,16 +206,16 @@ def draw_path(frame, path, K, R, color=(0, 255, 0), thickness=2):
             cv2.line(frame, tuple(points_2d[i]), tuple(points_2d[i+1]), c, thickness)
 
 
-def draw_lane_line(frame, lane, K, R, color=(255, 255, 0), thickness=2):
+def draw_lane_line(frame, lane, transform, color=(255, 255, 0), thickness=2):
     """Draw single lane line"""
     if not lane or 'x' not in lane:
         return
 
-    # Convert to 3D points
+    # Convert to 3D points in device frame
     points_3d = np.column_stack([lane['x'], lane['y'], lane['z']])
 
     # Project to screen
-    points_2d = project_points_to_screen(points_3d, K, R, frame.shape[1], frame.shape[0])
+    points_2d = project_points_to_screen(points_3d, transform, frame.shape[1], frame.shape[0])
 
     if len(points_2d) > 1:
         # Scale alpha by probability
@@ -162,7 +226,7 @@ def draw_lane_line(frame, lane, K, R, color=(255, 255, 0), thickness=2):
         cv2.polylines(frame, [points_2d], False, c, thickness, cv2.LINE_AA)
 
 
-def draw_lead_car(frame, lead, K, R):
+def draw_lead_car(frame, lead, transform):
     """Draw lead car detection as bounding box"""
     if not lead or 'x' not in lead or len(lead['x']) == 0:
         return
@@ -178,7 +242,7 @@ def draw_lead_car(frame, lead, K, R):
     car_width = 1.8
     car_height = 1.5
 
-    # Four corners of lead car (in car space)
+    # Four corners of lead car (in device frame: x=forward, y=right, z=down)
     corners_3d = np.array([
         [x, y - car_width/2, 0],            # Bottom left
         [x, y + car_width/2, 0],            # Bottom right
@@ -187,7 +251,7 @@ def draw_lead_car(frame, lead, K, R):
     ])
 
     # Project to screen
-    corners_2d = project_points_to_screen(corners_3d, K, R, frame.shape[1], frame.shape[0])
+    corners_2d = project_points_to_screen(corners_3d, transform, frame.shape[1], frame.shape[0])
 
     if len(corners_2d) >= 4:
         # Draw bounding box
@@ -202,20 +266,20 @@ def draw_lead_car(frame, lead, K, R):
 
 
 def draw_model_overlay(frame, model_data, camera_name):
-    """Draw all model predictions on frame"""
+    """Draw all model predictions on frame using openpilot's exact transformation"""
     if not model_data:
         return
 
-    # Get camera intrinsics
-    K = get_camera_intrinsics(camera_name)
-
-    # Get calibration rotation
+    # Get calibration data
     cal = model_data.get('calibration', {})
-    R = get_calibration_rotation(cal.get('rpy', [0, 0, 0]))
+    rpy_calib = cal.get('rpy', [0, 0, 0])
+
+    # Calculate the full transformation matrix (same as openpilot)
+    transform = calculate_transform(camera_name, rpy_calib, frame.shape[1], frame.shape[0])
 
     # Draw vehicle path (green, thick)
     if 'path' in model_data:
-        draw_path(frame, model_data['path'], K, R, color=(0, 200, 0), thickness=4)
+        draw_path(frame, model_data['path'], transform, color=(0, 200, 0), thickness=4)
 
     # Draw lane lines (yellow/blue)
     lane_colors = [
@@ -227,15 +291,15 @@ def draw_model_overlay(frame, model_data, camera_name):
 
     for i, lane in enumerate(model_data.get('laneLines', [])):
         color = lane_colors[i % len(lane_colors)]
-        draw_lane_line(frame, lane, K, R, color=color, thickness=2)
+        draw_lane_line(frame, lane, transform, color=color, thickness=2)
 
     # Draw road edges (orange, thick)
     for edge in model_data.get('roadEdges', []):
-        draw_lane_line(frame, edge, K, R, color=(0, 165, 255), thickness=3)
+        draw_lane_line(frame, edge, transform, color=(0, 165, 255), thickness=3)
 
     # Draw lead cars (red boxes)
     for lead in model_data.get('leads', []):
-        draw_lead_car(frame, lead, K, R)
+        draw_lead_car(frame, lead, transform)
 
 
 class StreamViewer:
