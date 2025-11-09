@@ -62,9 +62,32 @@ def yuv_to_bgr(buf):
     return bgr
 
 
+# Global debug counter for extract_model_data
+_debug_frame_count = 0
+
 def extract_model_data(sm):
     """Extract relevant model data for overlay rendering"""
+    global _debug_frame_count
     model_data = {}
+
+    # Debug logging every 20 frames (once per second at 20 FPS)
+    _debug_frame_count += 1
+    if _debug_frame_count % 20 == 0:
+        print(f"\n[DEBUG] Frame {_debug_frame_count}:")
+        print(f"  modelV2: valid={sm.valid['modelV2']}, updated={sm.updated['modelV2']}")
+        print(f"  liveCalibration: valid={sm.valid['liveCalibration']}, updated={sm.updated['liveCalibration']}")
+
+        if sm.valid['liveCalibration']:
+            cal = sm['liveCalibration']
+            print(f"  Calibration: status={cal.calStatus}, rpy={[f'{x:.3f}' for x in cal.rpyCalib]}")
+        else:
+            print(f"  Calibration: NOT AVAILABLE")
+
+        if sm.valid['modelV2']:
+            m = sm['modelV2']
+            print(f"  Model: frameId={m.frameId}, laneProbs={[f'{x:.2f}' for x in m.laneLineProbs]}")
+        else:
+            print(f"  Model: NOT PUBLISHING")
 
     # Get modelV2 message - use sm.valid to check if we've EVER received data
     # (sm.updated only True if NEW message this cycle)
