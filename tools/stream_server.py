@@ -19,9 +19,9 @@ from openpilot.system.manager.process_config import managed_processes
 
 
 ENCODE_SOCKETS = {
-    "road": "livestreamRoadEncodeData",
-    "driver": "livestreamDriverEncodeData",
-    "wide": "livestreamWideRoadEncodeData",
+    "road": "roadEncodeData",
+    "driver": "driverEncodeData",
+    "wide": "wideRoadEncodeData",
 }
 
 
