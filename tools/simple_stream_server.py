@@ -132,16 +132,19 @@ def stream_mjpeg(port, quality, target_fps):
             managed_processes['camerad'].start()
             time.sleep(2)
 
-    # Check if modeld is already running
+    # Check if modeld is already running (e.g., while driving)
+    # We don't start it ourselves to avoid core affinity issues
     modeld_running = False
+    modeld_available = False
     try:
         subprocess.check_call(["pgrep", "modeld"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         modeld_running = True
+        modeld_available = True
+        print("modeld is running - model overlays will be available")
     except subprocess.CalledProcessError:
-        print("Starting modeld...")
-        if not PC:
-            managed_processes['modeld'].start()
-            time.sleep(2)
+        print("modeld not running - model overlays disabled")
+        print("(Model overlays only available while driving/when modeld is running)")
+        modeld_available = False
 
     # Setup VisionIPC clients for all cameras
     vipc_clients = {}
@@ -152,8 +155,8 @@ def stream_mjpeg(port, quality, target_fps):
     services = list(CAMERA_SERVICES.values()) + ['modelV2', 'liveCalibration']
     sm = messaging.SubMaster(services)
 
-    # Wait for cameras and model
-    print("Waiting for cameras and model...")
+    # Wait for cameras
+    print("Waiting for cameras...")
     for service_name in CAMERA_SERVICES.values():
         while sm[service_name].frameId < 10:
             sm.update(100)
@@ -163,10 +166,22 @@ def stream_mjpeg(port, quality, target_fps):
         client.connect(True)
 
     print("All cameras ready!")
-    print("Waiting for model...")
-    while not sm.updated['modelV2']:
-        sm.update(100)
-    print("Model ready!")
+
+    # Wait for model if available (but don't block forever)
+    if modeld_available:
+        print("Waiting for model data...")
+        wait_count = 0
+        while not sm.updated['modelV2'] and wait_count < 50:
+            sm.update(100)
+            wait_count += 1
+
+        if sm.updated['modelV2']:
+            print("Model ready!")
+        else:
+            print("Warning: Model data not available - overlays disabled")
+            modeld_available = False
+    else:
+        print("Streaming without model overlays")
 
     # Setup HTTP server
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -290,8 +305,6 @@ def stream_mjpeg(port, quality, target_fps):
         server_sock.close()
         if not camerad_running and not PC:
             managed_processes['camerad'].stop()
-        if not modeld_running and not PC:
-            managed_processes['modeld'].stop()
         print("Server stopped")
 
 
