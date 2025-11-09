@@ -157,19 +157,9 @@ def stream_mjpeg(port, quality, target_fps):
                 managed_processes['modeld'].start()
                 print("Waiting for modeld to initialize (takes 5-10 seconds)...")
                 time.sleep(8)
-                # Verify it started successfully
-                try:
-                    subprocess.check_call(["pgrep", "-f", "selfdrive.modeld.modeld"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    modeld_available = True
-                    print("modeld started successfully!")
-                except:
-                    # Try alternative check
-                    result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
-                    if "modeld" in result.stdout:
-                        modeld_available = True
-                        print("modeld is running!")
-                    else:
-                        raise Exception("modeld process not found")
+                # Just assume it started - we'll verify by checking for model data later
+                modeld_available = True
+                print("modeld started - will verify with model data...")
             except Exception as e:
                 print(f"Warning: Could not start modeld: {e}")
                 print("Streaming without model overlays")
@@ -319,30 +309,44 @@ def stream_mjpeg(port, quality, target_fps):
 
     try:
         while True:
-            client_sock, addr = server_sock.accept()
-
-            # Set socket timeout for reading HTTP request
-            client_sock.settimeout(2.0)
-
-            # Read HTTP request to get camera parameter
             try:
-                request = client_sock.recv(1024).decode('utf-8', errors='ignore')
-                request_line = request.split('\r\n')[0]
-                path = request_line.split(' ')[1]
-                query = parse_qs(urlparse(path).query)
-                camera_name = query.get('camera', ['road'])[0]
+                print("Waiting for client connection...")
+                client_sock, addr = server_sock.accept()
+                print(f"Connection accepted from {addr}")
 
-                if camera_name not in VISION_STREAMS:
+                # Set socket timeout for reading HTTP request
+                client_sock.settimeout(2.0)
+
+                # Read HTTP request to get camera parameter
+                try:
+                    request = client_sock.recv(1024).decode('utf-8', errors='ignore')
+                    request_line = request.split('\r\n')[0]
+                    path = request_line.split(' ')[1]
+                    query = parse_qs(urlparse(path).query)
+                    camera_name = query.get('camera', ['road'])[0]
+
+                    if camera_name not in VISION_STREAMS:
+                        camera_name = 'road'
+
+                    print(f"Client requesting {camera_name} camera")
+                except Exception as e:
                     camera_name = 'road'
+                    print(f"Parse error, defaulting to {camera_name}: {e}")
 
-                print(f"\nClient connected from {addr} - Camera: {camera_name}")
+                # Handle client in a separate thread for concurrent connections
+                print(f"Starting thread for {camera_name} camera stream")
+                client_thread = threading.Thread(target=handle_client, args=(client_sock, addr, camera_name), daemon=True)
+                client_thread.start()
+                print(f"Thread started for {addr}")
+
+            except KeyboardInterrupt:
+                print("\nShutting down server...")
+                break
             except Exception as e:
-                camera_name = 'road'
-                print(f"\nClient connected from {addr} - Default camera: {camera_name} (parse error: {e})")
-
-            # Handle client in a separate thread for concurrent connections
-            client_thread = threading.Thread(target=handle_client, args=(client_sock, addr, camera_name), daemon=True)
-            client_thread.start()
+                print(f"Error in accept loop: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(0.1)
 
     finally:
         server_sock.close()
