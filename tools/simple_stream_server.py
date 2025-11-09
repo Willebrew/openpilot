@@ -13,6 +13,7 @@ import time
 import cv2
 import numpy as np
 import json
+import threading
 from urllib.parse import parse_qs, urlparse
 
 import cereal.messaging as messaging
@@ -154,11 +155,21 @@ def stream_mjpeg(port, quality, target_fps):
 
             try:
                 managed_processes['modeld'].start()
-                time.sleep(3)
+                print("Waiting for modeld to initialize (takes 5-10 seconds)...")
+                time.sleep(8)
                 # Verify it started successfully
-                subprocess.check_call(["pgrep", "modeld"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                modeld_available = True
-                print("modeld started successfully!")
+                try:
+                    subprocess.check_call(["pgrep", "-f", "selfdrive.modeld.modeld"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    modeld_available = True
+                    print("modeld started successfully!")
+                except:
+                    # Try alternative check
+                    result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+                    if "modeld" in result.stdout:
+                        modeld_available = True
+                        print("modeld is running!")
+                    else:
+                        raise Exception("modeld process not found")
             except Exception as e:
                 print(f"Warning: Could not start modeld: {e}")
                 print("Streaming without model overlays")
@@ -207,7 +218,7 @@ def stream_mjpeg(port, quality, target_fps):
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_sock.bind(('0.0.0.0', port))
-    server_sock.listen(1)
+    server_sock.listen(5)  # Allow multiple pending connections
 
     print(f"\nMJPEG server listening on http://0.0.0.0:{port}")
     print(f"\nTo view stream:")
@@ -217,6 +228,94 @@ def stream_mjpeg(port, quality, target_fps):
 
     frame_time = 1.0 / target_fps
     encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+
+    def handle_client(client_sock, addr, camera_name):
+        """Handle a single client connection in a separate thread"""
+        try:
+            # Get the VisionIPC client for selected camera
+            vipc_client = vipc_clients[camera_name]
+
+            # Remove timeout for streaming
+            client_sock.settimeout(None)
+
+            # Send HTTP headers for multipart stream (JPEG + JSON)
+            headers = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
+                b"Cache-Control: no-cache\r\n"
+                b"Connection: keep-alive\r\n"
+                b"\r\n"
+            )
+            client_sock.sendall(headers)
+
+            frame_count = 0
+            start_time = time.time()
+            last_fps_time = start_time
+            last_frame_time = start_time
+
+            while True:
+                current_time = time.time()
+
+                # Rate limit to target FPS
+                if current_time - last_frame_time < frame_time:
+                    time.sleep(0.001)
+                    continue
+
+                last_frame_time = current_time
+
+                # Update messaging
+                sm.update(0)
+
+                # Get frame from selected camera
+                buf = vipc_client.recv()
+                if buf is None:
+                    time.sleep(0.01)
+                    continue
+
+                # Convert YUV to BGR
+                bgr = yuv_to_bgr(buf)
+
+                # Encode to JPEG
+                _, jpeg = cv2.imencode('.jpg', bgr, encode_params)
+                jpeg_bytes = jpeg.tobytes()
+
+                # Extract model data if available
+                model_json = b'{}'
+                if modeld_available:
+                    try:
+                        model_data = extract_model_data(sm)
+                        model_json = json.dumps(model_data).encode('utf-8')
+                    except:
+                        model_json = b'{}'
+
+                # Send multipart frame with both image and model data
+                frame_header = (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: " + str(len(jpeg_bytes)).encode() + b"\r\n"
+                    b"X-Camera: " + camera_name.encode() + b"\r\n"
+                    b"X-Model-Data: " + model_json + b"\r\n"
+                    b"\r\n"
+                )
+
+                try:
+                    client_sock.sendall(frame_header + jpeg_bytes + b"\r\n")
+                    frame_count += 1
+
+                    # Print stats
+                    if current_time - last_fps_time >= 5.0:
+                        fps = frame_count / (current_time - start_time)
+                        print(f"[{camera_name}] Streaming at {fps:.1f} FPS | JPEG: {len(jpeg_bytes)/1024:.1f} KB | Model: {len(model_json)/1024:.1f} KB")
+                        last_fps_time = current_time
+
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    print(f"[{camera_name}] Client {addr} disconnected")
+                    break
+
+        except Exception as e:
+            print(f"[{camera_name}] Error handling client {addr}: {e}")
+        finally:
+            client_sock.close()
 
     try:
         while True:
@@ -241,97 +340,9 @@ def stream_mjpeg(port, quality, target_fps):
                 camera_name = 'road'
                 print(f"\nClient connected from {addr} - Default camera: {camera_name} (parse error: {e})")
 
-            # Get the VisionIPC client for selected camera
-            vipc_client = vipc_clients[camera_name]
-
-            # Remove timeout for streaming
-            client_sock.settimeout(None)
-
-            # Send HTTP headers for multipart stream (JPEG + JSON)
-            headers = (
-                b"HTTP/1.1 200 OK\r\n"
-                b"Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
-                b"Cache-Control: no-cache\r\n"
-                b"Connection: keep-alive\r\n"
-                b"\r\n"
-            )
-            try:
-                client_sock.sendall(headers)
-            except Exception as e:
-                print(f"Failed to send headers: {e}")
-                client_sock.close()
-                continue
-
-            frame_count = 0
-            start_time = time.time()
-            last_fps_time = start_time
-            last_frame_time = start_time
-
-            try:
-                while True:
-                    current_time = time.time()
-
-                    # Rate limit to target FPS
-                    if current_time - last_frame_time < frame_time:
-                        time.sleep(0.001)
-                        continue
-
-                    last_frame_time = current_time
-
-                    # Update messaging
-                    sm.update(0)
-
-                    # Get frame from selected camera
-                    buf = vipc_client.recv()
-                    if buf is None:
-                        time.sleep(0.01)
-                        continue
-
-                    # Convert YUV to BGR
-                    bgr = yuv_to_bgr(buf)
-
-                    # Encode to JPEG
-                    _, jpeg = cv2.imencode('.jpg', bgr, encode_params)
-                    jpeg_bytes = jpeg.tobytes()
-
-                    # Extract model data if available
-                    model_json = b'{}'
-                    if modeld_available:
-                        try:
-                            model_data = extract_model_data(sm)
-                            model_json = json.dumps(model_data).encode('utf-8')
-                        except:
-                            model_json = b'{}'
-
-                    # Send multipart frame with both image and model data
-                    frame_header = (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n"
-                        b"Content-Length: " + str(len(jpeg_bytes)).encode() + b"\r\n"
-                        b"X-Camera: " + camera_name.encode() + b"\r\n"
-                        b"X-Model-Data: " + model_json + b"\r\n"
-                        b"\r\n"
-                    )
-
-                    try:
-                        client_sock.sendall(frame_header + jpeg_bytes + b"\r\n")
-                        frame_count += 1
-
-                        # Print stats
-                        if current_time - last_fps_time >= 5.0:
-                            fps = frame_count / (current_time - start_time)
-                            print(f"[{camera_name}] Streaming at {fps:.1f} FPS | JPEG: {len(jpeg_bytes)/1024:.1f} KB | Model: {len(model_json)/1024:.1f} KB")
-                            last_fps_time = current_time
-
-                    except (BrokenPipeError, ConnectionResetError, OSError):
-                        print(f"Client disconnected")
-                        break
-
-            except KeyboardInterrupt:
-                print("\nShutting down...")
-                break
-            finally:
-                client_sock.close()
+            # Handle client in a separate thread for concurrent connections
+            client_thread = threading.Thread(target=handle_client, args=(client_sock, addr, camera_name), daemon=True)
+            client_thread.start()
 
     finally:
         server_sock.close()
