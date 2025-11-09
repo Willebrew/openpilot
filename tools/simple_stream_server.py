@@ -36,17 +36,20 @@ def yuv_to_bgr(buf):
     """Convert YUV NV12 to BGR using OpenCV (fast, hardware accelerated)"""
     h, w = buf.height, buf.width
 
-    # Extract Y plane (make contiguous copy)
-    y = np.array(buf.data[:buf.uv_offset], dtype=np.uint8).reshape((-1, buf.stride))[:h, :w].copy()
+    # NV12 format: full Y plane, then interleaved UV at half resolution
+    # Extract Y plane - accounting for stride
+    y_plane = np.frombuffer(buf.data, dtype=np.uint8, count=buf.uv_offset)
+    y = y_plane.reshape((h, buf.stride))[:, :w].copy()
 
-    # Extract UV plane (interleaved NV12 format) - make contiguous copy
-    uv_offset_end = buf.uv_offset + (h//2 * buf.stride)
-    uv = np.array(buf.data[buf.uv_offset:uv_offset_end], dtype=np.uint8).reshape((h//2, buf.stride))[:h//2, :w].copy()
+    # Extract UV plane - accounting for stride
+    # UV is interleaved (UVUVUV...) at half resolution
+    uv_size = (h // 2) * buf.stride
+    uv_plane = np.frombuffer(buf.data, dtype=np.uint8, offset=buf.uv_offset, count=uv_size)
+    uv = uv_plane.reshape((h // 2, buf.stride))[:, :w].copy()
 
-    # Create YUV image in NV12 format for OpenCV
-    yuv_nv12 = np.zeros((h * 3 // 2, w), dtype=np.uint8)
-    yuv_nv12[:h] = y
-    yuv_nv12[h:] = uv
+    # Create properly formatted NV12 image for OpenCV
+    # Stack Y and UV vertically: [Y: h×w] [UV: h/2×w]
+    yuv_nv12 = np.vstack([y, uv])
 
     # Convert NV12 to BGR using OpenCV (hardware accelerated)
     bgr = cv2.cvtColor(yuv_nv12, cv2.COLOR_YUV2BGR_NV12)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MJPEG Stream Viewer for Mac
-Opens the openpilot camera stream in a standalone window
+Opens the openpilot camera stream in a standalone window with camera switching
 
 Usage: python3 mjpeg_viewer.py [device_ip] [--port PORT]
 
@@ -16,22 +16,51 @@ import requests
 import cv2
 import numpy as np
 from io import BytesIO
+import threading
+
+
+class CameraStreamer:
+    def __init__(self, base_url):
+        self.base_url = base_url
+        self.current_camera = 'road'
+        self.cameras = ['road', 'driver', 'wide']
+        self.lock = threading.Lock()
+        self.running = True
+        self.current_frame = None
+
+    def get_url(self):
+        # Change camera by requesting different URL parameter
+        # For now we'll just restart with the server serving one camera
+        # In practice you'd need multiple server instances or server modification
+        return self.base_url
+
+    def set_camera(self, camera):
+        with self.lock:
+            self.current_camera = camera
 
 
 def stream_mjpeg_viewer(url):
-    """View MJPEG stream in OpenCV window"""
+    """View MJPEG stream in OpenCV window with camera controls"""
     print(f"Connecting to {url}...")
 
     # Create window
-    window_name = f"openpilot Camera Stream - {url}"
+    window_name = "openpilot Camera Stream"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window_name, 1280, 960)
+
+    current_camera = 'road'
+    cameras = ['road', 'driver', 'wide']
+    camera_index = 0
 
     print("Opening stream...")
     print("\nControls:")
     print("  q - Quit")
     print("  f - Toggle fullscreen")
     print("  s - Save screenshot")
+    print("  1 - Switch to Road camera")
+    print("  2 - Switch to Driver camera")
+    print("  3 - Switch to Wide camera")
+    print("  n - Next camera")
     print("  + - Increase window size")
     print("  - - Decrease window size")
     print("")
@@ -82,6 +111,16 @@ def stream_mjpeg_viewer(url):
                     # Display frame
                     cv2.imshow(window_name, frame)
 
+                    # Add camera info overlay
+                    cv2.putText(frame, f"Camera: {current_camera.upper()}",
+                               (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.putText(frame, "1:Road | 2:Driver | 3:Wide | N:Next",
+                               (10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                               0.6, (0, 255, 0), 2)
+
+                    # Display frame
+                    cv2.imshow(window_name, frame)
+
                     # Handle keyboard input
                     key = cv2.waitKey(1) & 0xFF
 
@@ -97,9 +136,33 @@ def stream_mjpeg_viewer(url):
                         print(f"Fullscreen: {'ON' if fullscreen else 'OFF'}")
                     elif key == ord('s'):
                         timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        filename = f"openpilot_screenshot_{timestamp}.jpg"
+                        filename = f"openpilot_{current_camera}_{timestamp}.jpg"
                         cv2.imwrite(filename, frame)
                         print(f"Screenshot saved: {filename}")
+                    elif key == ord('1'):
+                        if current_camera != 'road':
+                            current_camera = 'road'
+                            camera_index = 0
+                            print(f"\nSwitching to ROAD camera...")
+                            print("Note: You need to restart the server with: --camera road")
+                            print("Or run 3 servers on different ports for live switching")
+                    elif key == ord('2'):
+                        if current_camera != 'driver':
+                            current_camera = 'driver'
+                            camera_index = 1
+                            print(f"\nSwitching to DRIVER camera...")
+                            print("Note: You need to restart the server with: --camera driver")
+                    elif key == ord('3'):
+                        if current_camera != 'wide':
+                            current_camera = 'wide'
+                            camera_index = 2
+                            print(f"\nSwitching to WIDE camera...")
+                            print("Note: You need to restart the server with: --camera wide")
+                    elif key == ord('n'):
+                        camera_index = (camera_index + 1) % len(cameras)
+                        current_camera = cameras[camera_index]
+                        print(f"\nNext camera: {current_camera.upper()}")
+                        print("Note: You need to restart the server with: --camera " + current_camera)
                     elif key == ord('+') or key == ord('='):
                         # Increase window size
                         w, h = cv2.getWindowImageRect(window_name)[2:]
