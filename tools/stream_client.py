@@ -70,16 +70,18 @@ def stream_to_ffplay(sock, device_ip, port):
         "-framedrop",              # Drop frames if behind
         "-probesize", "32",        # Minimal probe
         "-sync", "ext",            # External sync
+        "-vf", "setpts=0",         # Reset timestamps
         "-i", "pipe:0",            # Read from stdin
         "-window_title", f"openpilot {device_ip}",
+        "-loglevel", "warning",    # Show warnings
     ]
 
     try:
         ffplay = subprocess.Popen(
             ffplay_cmd,
             stdin=subprocess.PIPE,
+            # Don't suppress stderr so we can see ffplay errors
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
         )
 
         packet_count = 0

@@ -106,22 +106,42 @@ def stream_encoded_video(camera_name, port):
                 start_time = time.time()
                 last_fps_time = start_time
                 sent_header = False
+                last_frame_id = 0
+
+                # Wait for a frame with header
+                print("Waiting for keyframe with header...")
+                while True:
+                    sm.update(100)
+                    msg = sm[sock_name]
+
+                    if msg.idx.frameId > 0 and len(msg.header) > 0:
+                        # Send header first
+                        send_packet(client_sock, bytes(msg.header))
+                        sent_header = True
+                        print(f"Sent H.264 header ({len(msg.header)} bytes)")
+
+                        # Send the keyframe data
+                        if len(msg.data) > 0:
+                            send_packet(client_sock, bytes(msg.data))
+                            last_frame_id = msg.idx.frameId
+                            frame_count = 1
+                        break
+
+                print("Streaming frames...")
+                start_time = time.time()
+                last_fps_time = start_time
 
                 while True:
                     sm.update(0)  # Non-blocking
                     msg = sm[sock_name]
 
-                    if msg.idx.frameId == 0:
-                        time.sleep(0.01)
+                    if msg.idx.frameId == 0 or msg.idx.frameId == last_frame_id:
+                        time.sleep(0.001)
                         continue
 
-                    # Send header on first frame or keyframe
-                    if not sent_header and len(msg.header) > 0:
-                        send_packet(client_sock, bytes(msg.header))
-                        sent_header = True
-                        print("Sent H.264 header")
+                    last_frame_id = msg.idx.frameId
 
-                    # Send frame data
+                    # Send frame data (header was already sent)
                     if len(msg.data) > 0:
                         send_packet(client_sock, bytes(msg.data))
                         frame_count += 1
@@ -130,7 +150,7 @@ def stream_encoded_video(camera_name, port):
                         current_time = time.time()
                         if current_time - last_fps_time >= 1.0:
                             fps = frame_count / (current_time - start_time)
-                            print(f"Streaming at {fps:.1f} FPS | Packet size: {len(msg.data)/1024:.1f} KB")
+                            print(f"Streaming at {fps:.1f} FPS | Packet size: {len(msg.data)/1024:.1f} KB | Frame ID: {msg.idx.frameId}")
                             last_fps_time = current_time
 
             except (BrokenPipeError, ConnectionResetError):
