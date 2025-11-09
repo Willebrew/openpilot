@@ -187,8 +187,8 @@ def main():
     parser.add_argument('--port', type=int, default=8000, help='HTTP port (default: 8000)')
     parser.add_argument('--camera', choices=['road', 'driver', 'wide'], default='road',
                         help='Camera to stream (default: road)')
-    parser.add_argument('--quality', type=int, default=80, help='JPEG quality 1-100 (default: 80)')
-    parser.add_argument('--fps', type=int, default=10, help='Target FPS (default: 10)')
+    parser.add_argument('--quality', type=int, default=60, help='JPEG quality 1-100 (default: 60)')
+    parser.add_argument('--fps', type=int, default=20, help='Target FPS (default: 20)')
     args = parser.parse_args()
 
     print("=" * 60)
