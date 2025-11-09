@@ -17,6 +17,7 @@ import threading
 from urllib.parse import parse_qs, urlparse
 
 import cereal.messaging as messaging
+from cereal import log
 from msgq.visionipc import VisionIpcClient, VisionStreamType
 from openpilot.system.hardware import PC
 from openpilot.system.manager.process_config import managed_processes
@@ -27,6 +28,44 @@ VISION_STREAMS = {
     "driver": VisionStreamType.VISION_STREAM_DRIVER,
     "wide": VisionStreamType.VISION_STREAM_WIDE_ROAD,
 }
+
+# Global flag to stop fake calibration thread
+_stop_fake_calib = threading.Event()
+
+
+def publish_fake_calibration():
+    """
+    Publish static calibration data in background thread.
+    This allows modeld to run without needing the car to drive.
+    Uses openpilot's default initialization values.
+    """
+    pm = messaging.PubMaster(['liveCalibration'])
+
+    # Default calibration values from selfdrive/locationd/calibrationd.py
+    rpy = [0.0, 0.0, 0.0]  # Roll, pitch, yaw (radians)
+    height = 1.22  # Camera height (meters)
+
+    print(f"Fake calibration thread started (RPY={rpy}, height={height}m, status=CALIBRATED)")
+
+    frame = 0
+    try:
+        while not _stop_fake_calib.is_set():
+            msg = messaging.new_message('liveCalibration')
+            msg.liveCalibration.validBlocks = 20
+            msg.liveCalibration.calStatus = log.LiveCalibrationData.Status.calibrated  # Status = 1
+            msg.liveCalibration.calPerc = 100
+            msg.liveCalibration.rpyCalib = rpy
+            msg.liveCalibration.height = [height]
+
+            pm.send('liveCalibration', msg)
+
+            frame += 1
+            time.sleep(1.0 / 20.0)  # 20 Hz
+
+    except Exception as e:
+        print(f"Fake calibration thread error: {e}")
+    finally:
+        print("Fake calibration thread stopped")
 
 CAMERA_SERVICES = {
     "road": "roadCameraState",
@@ -157,17 +196,13 @@ def stream_mjpeg(port, quality, target_fps):
             managed_processes['camerad'].start()
             time.sleep(2)
 
-    # Check if calibrationd is already running (needed for modeld)
-    calibrationd_running = False
-    try:
-        subprocess.check_call(["pgrep", "calibrationd"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        calibrationd_running = True
-        print("calibrationd already running")
-    except subprocess.CalledProcessError:
-        print("Starting calibrationd (required for model)...")
-        if not PC:
-            managed_processes['calibrationd'].start()
-            time.sleep(1)
+    # Start fake calibration publisher in background thread
+    # This provides static calibration data so modeld can run without car movement
+    print("Starting fake calibration publisher (provides static calibration for testing)...")
+    _stop_fake_calib.clear()
+    calib_thread = threading.Thread(target=publish_fake_calibration, daemon=True)
+    calib_thread.start()
+    time.sleep(0.5)  # Give it time to start publishing
 
     # Check if modeld is already running, otherwise start it
     modeld_running = False
@@ -381,10 +416,13 @@ def stream_mjpeg(port, quality, target_fps):
 
     finally:
         server_sock.close()
+
+        # Stop fake calibration thread
+        _stop_fake_calib.set()
+
         if not camerad_running and not PC:
             managed_processes['camerad'].stop()
-        if not calibrationd_running and not PC:
-            managed_processes['calibrationd'].stop()
+
         print("Server stopped")
 
 
