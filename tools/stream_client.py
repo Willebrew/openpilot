@@ -62,25 +62,42 @@ def stream_to_ffplay(sock, device_ip, port):
     print("  s - Step to next frame (when paused)")
     print("\n" + "="*60)
 
+    # Use ffmpeg to convert the stream to a format ffplay can handle
+    # First, pipe through ffmpeg to decode and re-encode
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-f", "h264",
+        "-i", "pipe:0",
+        "-c:v", "copy",            # Just copy, don't re-encode
+        "-f", "mpegts",            # Output as MPEG-TS (better for streaming)
+        "-tune", "zerolatency",
+        "-",                       # Output to stdout
+    ]
+
     ffplay_cmd = [
         "ffplay",
-        "-f", "h264",              # Input format is raw H.264
+        "-f", "mpegts",            # Input is MPEG-TS
         "-fflags", "nobuffer",     # Minimize buffering
         "-flags", "low_delay",     # Low latency mode
         "-framedrop",              # Drop frames if behind
-        "-probesize", "32",        # Minimal probe
-        "-sync", "ext",            # External sync
-        "-vf", "setpts=0",         # Reset timestamps
         "-i", "pipe:0",            # Read from stdin
         "-window_title", f"openpilot {device_ip}",
         "-loglevel", "warning",    # Show warnings
     ]
 
     try:
+        # Start ffmpeg to mux the stream
+        ffmpeg = subprocess.Popen(
+            ffmpeg_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Start ffplay to display the muxed stream
         ffplay = subprocess.Popen(
             ffplay_cmd,
-            stdin=subprocess.PIPE,
-            # Don't suppress stderr so we can see ffplay errors
+            stdin=ffmpeg.stdout,
             stdout=subprocess.DEVNULL,
         )
 
@@ -93,27 +110,29 @@ def stream_to_ffplay(sock, device_ip, port):
                     print("\nConnection closed by server")
                     break
 
-                # Send to ffplay
+                # Send to ffmpeg
                 try:
-                    ffplay.stdin.write(packet)
-                    ffplay.stdin.flush()
+                    ffmpeg.stdin.write(packet)
+                    ffmpeg.stdin.flush()
                     packet_count += 1
 
                     if packet_count % 100 == 0:
                         print(f"Received {packet_count} packets...", end='\r')
 
                 except BrokenPipeError:
-                    print("\nffplay closed")
+                    print("\nPipeline closed")
                     break
 
         except KeyboardInterrupt:
             print("\nStopping...")
         finally:
             try:
-                ffplay.stdin.close()
+                ffmpeg.stdin.close()
             except:
                 pass
+            ffmpeg.terminate()
             ffplay.terminate()
+            ffmpeg.wait(timeout=2)
             ffplay.wait(timeout=2)
 
     except Exception as e:
