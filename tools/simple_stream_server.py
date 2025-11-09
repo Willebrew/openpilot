@@ -66,8 +66,9 @@ def extract_model_data(sm):
     """Extract relevant model data for overlay rendering"""
     model_data = {}
 
-    # Get modelV2 message
-    if sm.updated['modelV2']:
+    # Get modelV2 message - use sm.valid to check if we've EVER received data
+    # (sm.updated only True if NEW message this cycle)
+    if sm.valid['modelV2']:
         m = sm['modelV2']
 
         # Extract lane lines (4 lines with x, y, z arrays)
@@ -75,19 +76,19 @@ def extract_model_data(sm):
         for i, lane in enumerate(m.laneLines):
             if i < len(m.laneLineProbs):
                 model_data['laneLines'].append({
-                    'x': lane.x[:],
-                    'y': lane.y[:],
-                    'z': lane.z[:],
-                    'prob': m.laneLineProbs[i]
+                    'x': list(lane.x),
+                    'y': list(lane.y),
+                    'z': list(lane.z),
+                    'prob': float(m.laneLineProbs[i])
                 })
 
         # Extract road edges (2 edges)
         model_data['roadEdges'] = []
         for edge in m.roadEdges:
             model_data['roadEdges'].append({
-                'x': edge.x[:],
-                'y': edge.y[:],
-                'z': edge.z[:]
+                'x': list(edge.x),
+                'y': list(edge.y),
+                'z': list(edge.z)
             })
 
         # Extract lead cars (up to 3)
@@ -95,24 +96,24 @@ def extract_model_data(sm):
         for lead in m.leadsV3:
             if lead.prob > 0.3:  # Only include confident detections
                 model_data['leads'].append({
-                    'x': lead.x[:],
-                    'y': lead.y[:],
-                    'prob': lead.prob
+                    'x': list(lead.x),
+                    'y': list(lead.y),
+                    'prob': float(lead.prob)
                 })
 
         # Extract vehicle path
         model_data['path'] = {
-            'x': m.position.x[:],
-            'y': m.position.y[:],
-            'z': m.position.z[:]
+            'x': list(m.position.x),
+            'y': list(m.position.y),
+            'z': list(m.position.z)
         }
 
     # Get calibration data
-    if sm.updated['liveCalibration']:
+    if sm.valid['liveCalibration']:
         cal = sm['liveCalibration']
         model_data['calibration'] = {
-            'rpy': cal.rpyCalib[:],
-            'valid': cal.calStatus == 1
+            'rpy': list(cal.rpyCalib),
+            'valid': bool(cal.calStatus == 1)
         }
 
     return model_data
