@@ -116,11 +116,12 @@ def extract_model_data(sm):
         print(f"  modelV2: valid={sm.valid['modelV2']}, updated={sm.updated['modelV2']}")
         print(f"  liveCalibration: valid={sm.valid['liveCalibration']}, updated={sm.updated['liveCalibration']}")
 
-        if sm.valid['liveCalibration']:
+        # Try to access calibration message directly to see what's wrong
+        try:
             cal = sm['liveCalibration']
-            print(f"  Calibration: status={cal.calStatus}, rpy={[f'{x:.3f}' for x in cal.rpyCalib]}")
-        else:
-            print(f"  Calibration: NOT AVAILABLE")
+            print(f"  Calibration accessed: status={cal.calStatus}, rpy={[f'{x:.3f}' for x in cal.rpyCalib]}, validBlocks={cal.validBlocks}")
+        except Exception as e:
+            print(f"  Calibration ERROR: {e}")
 
         if sm.valid['modelV2']:
             m = sm['modelV2']
@@ -202,7 +203,7 @@ def stream_mjpeg(port, quality, target_fps):
     _stop_fake_calib.clear()
     calib_thread = threading.Thread(target=publish_fake_calibration, daemon=True)
     calib_thread.start()
-    time.sleep(0.5)  # Give it time to start publishing
+    time.sleep(1.0)  # Give it time to start publishing and send a few messages
 
     # Check if modeld is already running, otherwise start it
     modeld_running = False
