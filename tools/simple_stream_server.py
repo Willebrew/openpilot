@@ -133,6 +133,18 @@ def stream_mjpeg(port, quality, target_fps):
             managed_processes['camerad'].start()
             time.sleep(2)
 
+    # Check if calibrationd is already running (needed for modeld)
+    calibrationd_running = False
+    try:
+        subprocess.check_call(["pgrep", "calibrationd"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        calibrationd_running = True
+        print("calibrationd already running")
+    except subprocess.CalledProcessError:
+        print("Starting calibrationd (required for model)...")
+        if not PC:
+            managed_processes['calibrationd'].start()
+            time.sleep(1)
+
     # Check if modeld is already running, otherwise start it
     modeld_running = False
     modeld_available = False
@@ -188,19 +200,10 @@ def stream_mjpeg(port, quality, target_fps):
 
     print("All cameras ready!")
 
-    # Wait for model if available (but don't block forever)
+    # Don't wait for model data here - modeld needs camera frames first
+    # We'll check for model data availability while streaming
     if modeld_available:
-        print("Waiting for model data...")
-        wait_count = 0
-        while not sm.updated['modelV2'] and wait_count < 50:
-            sm.update(100)
-            wait_count += 1
-
-        if sm.updated['modelV2']:
-            print("Model ready!")
-        else:
-            print("Warning: Model data not available - overlays disabled")
-            modeld_available = False
+        print("modeld running - will check for model data during streaming")
     else:
         print("Streaming without model overlays")
 
@@ -242,6 +245,7 @@ def stream_mjpeg(port, quality, target_fps):
             start_time = time.time()
             last_fps_time = start_time
             last_frame_time = start_time
+            model_data_seen = False
 
             while True:
                 current_time = time.time()
@@ -274,6 +278,9 @@ def stream_mjpeg(port, quality, target_fps):
                 if modeld_available:
                     try:
                         model_data = extract_model_data(sm)
+                        if model_data and not model_data_seen:
+                            print(f"[{camera_name}] Model data available! Overlays active.")
+                            model_data_seen = True
                         model_json = json.dumps(model_data).encode('utf-8')
                     except:
                         model_json = b'{}'
@@ -352,6 +359,8 @@ def stream_mjpeg(port, quality, target_fps):
         server_sock.close()
         if not camerad_running and not PC:
             managed_processes['camerad'].stop()
+        if not calibrationd_running and not PC:
+            managed_processes['calibrationd'].stop()
         print("Server stopped")
 
 
