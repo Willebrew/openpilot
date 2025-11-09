@@ -12,8 +12,14 @@ import struct
 import subprocess
 import time
 import numpy as np
-from io import BytesIO
-from PIL import Image
+
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
+    from io import BytesIO
+    from PIL import Image
 
 import cereal.messaging as messaging
 from msgq.visionipc import VisionIpcClient, VisionStreamType
@@ -59,6 +65,50 @@ def extract_image(buf):
     v = np.array(buf.data[buf.uv_offset+1::2], dtype=np.uint8).reshape((-1, buf.stride//2))[:buf.height//2, :buf.width//2]
 
     return yuv_to_rgb(y, u, v)
+
+
+def extract_yuv_nv12(buf):
+    """Extract YUV NV12 image data directly from VisionIPC buffer (faster)"""
+    # NV12 format: Y plane followed by interleaved UV
+    h, w = buf.height, buf.width
+    yuv_size = h * w * 3 // 2
+
+    # Extract Y plane
+    y = np.array(buf.data[:buf.uv_offset], dtype=np.uint8).reshape((-1, buf.stride))[:h, :w]
+
+    # Extract UV plane (interleaved)
+    uv = np.array(buf.data[buf.uv_offset:buf.uv_offset + (h//2 * w)], dtype=np.uint8).reshape((h//2, w))
+
+    # Convert to YUV_I420 for OpenCV
+    yuv_i420 = np.zeros((h * 3 // 2, w), dtype=np.uint8)
+    yuv_i420[:h] = y
+
+    # Deinterleave UV
+    u = uv[:, 0::2]
+    v = uv[:, 1::2]
+    yuv_i420[h:h+h//4] = u.reshape(h//4, w)
+    yuv_i420[h+h//4:] = v.reshape(h//4, w)
+
+    return yuv_i420
+
+
+def encode_jpeg_cv2(rgb_img, quality):
+    """Encode RGB image to JPEG using OpenCV (fast)"""
+    # OpenCV uses BGR, so convert RGB to BGR
+    bgr_img = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+    _, jpeg_data = cv2.imencode('.jpg', bgr_img, encode_param)
+    return jpeg_data.tobytes()
+
+
+def encode_jpeg_pil(rgb_img, quality):
+    """Encode RGB image to JPEG using PIL (slower fallback)"""
+    from io import BytesIO
+    from PIL import Image
+    img = Image.fromarray(rgb_img)
+    jpeg_buffer = BytesIO()
+    img.save(jpeg_buffer, format='JPEG', quality=quality, optimize=False)
+    return jpeg_buffer.getvalue()
 
 
 def send_frame(sock, frame_data):
@@ -159,11 +209,11 @@ def stream_camera(camera_name, port, quality):
                     # Extract and convert to RGB
                     rgb_img = extract_image(buf)
 
-                    # Convert to JPEG
-                    img = Image.fromarray(rgb_img)
-                    jpeg_buffer = BytesIO()
-                    img.save(jpeg_buffer, format='JPEG', quality=quality)
-                    jpeg_data = jpeg_buffer.getvalue()
+                    # Encode to JPEG using faster method
+                    if HAS_CV2:
+                        jpeg_data = encode_jpeg_cv2(rgb_img, quality)
+                    else:
+                        jpeg_data = encode_jpeg_pil(rgb_img, quality)
 
                     # Send to client
                     try:
@@ -212,7 +262,13 @@ def main():
     print(f"Camera: {args.camera}")
     print(f"Port: {args.port}")
     print(f"Quality: {args.quality}")
+    print(f"Encoder: {'OpenCV (fast)' if HAS_CV2 else 'PIL (slow)'}")
     print("=" * 60)
+
+    if not HAS_CV2:
+        print("WARNING: OpenCV (cv2) not found. Using slower PIL encoder.")
+        print("Install opencv for better performance: pip install opencv-python")
+        print("=" * 60)
 
     stream_camera(args.camera, args.port, args.quality)
 
