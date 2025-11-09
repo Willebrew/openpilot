@@ -9,6 +9,7 @@ Usage: python3 camera_stream_server.py [--port PORT] [--camera CAMERA] [--qualit
 import argparse
 import socket
 import struct
+import subprocess
 import time
 import numpy as np
 from io import BytesIO
@@ -16,6 +17,9 @@ from PIL import Image
 
 import cereal.messaging as messaging
 from msgq.visionipc import VisionIpcClient, VisionStreamType
+from openpilot.common.params import Params
+from openpilot.system.hardware import PC
+from openpilot.system.manager.process_config import managed_processes
 
 
 VISION_STREAMS = {
@@ -73,32 +77,71 @@ def stream_camera(camera_name, port, quality):
     service_name = CAMERA_SERVICES[camera_name]
     stream_type = VISION_STREAMS[camera_name]
 
+    # Check if camerad is already running
+    camerad_running = False
+    try:
+        subprocess.check_call(["pgrep", "camerad"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("camerad already running")
+        camerad_running = True
+    except subprocess.CalledProcessError:
+        print("camerad not running, starting it...")
+        if not PC:
+            try:
+                managed_processes['camerad'].start()
+                print("camerad started successfully")
+                time.sleep(2)  # Give camerad time to initialize
+            except Exception as e:
+                print(f"Warning: Could not start camerad: {e}")
+                print("Attempting to continue anyway...")
+        else:
+            print("Running on PC, camerad may need to be started manually")
+
     sm = messaging.SubMaster([service_name])
     vipc_client = VisionIpcClient("camerad", stream_type, True)
 
-    # Wait for camera to be ready
-    print("Waiting for camera to start...")
-    while sm[service_name].frameId < 10:
-        sm.update()
-
-    # Connect to VisionIPC
-    print("Connecting to camera stream...")
-    vipc_client.connect(True)
-
-    # Setup TCP server
+    # Setup TCP server FIRST so clients can connect while we wait
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_sock.bind(('0.0.0.0', port))
     server_sock.listen(1)
+    server_sock.settimeout(1.0)  # Non-blocking accept with 1s timeout
 
     print(f"Server listening on 0.0.0.0:{port}")
-    print(f"Waiting for client connection...")
+    print(f"Waiting for camera to start and client connection...")
 
     try:
+        # Wait for camera to be ready (in background while accepting connections)
+        camera_ready = False
+        max_wait = 30  # 30 seconds timeout
+        wait_start = time.time()
+
+        while not camera_ready:
+            sm.update(100)  # 100ms timeout
+            if sm[service_name].frameId >= 10:
+                camera_ready = True
+                print("Camera ready!")
+                break
+
+            if time.time() - wait_start > max_wait:
+                print(f"Warning: Camera not ready after {max_wait}s, but continuing...")
+                print(f"Current frameId: {sm[service_name].frameId}")
+                camera_ready = True  # Continue anyway
+                break
+
+        # Connect to VisionIPC
+        print("Connecting to camera stream...")
+        vipc_client.connect(True)
+        print("Connected to VisionIPC")
+
+        print("Ready for client connections!")
+
         while True:
-            # Accept client connection
-            client_sock, addr = server_sock.accept()
-            print(f"Client connected from {addr}")
+            # Accept client connection (non-blocking with timeout)
+            try:
+                client_sock, addr = server_sock.accept()
+                print(f"Client connected from {addr}")
+            except socket.timeout:
+                continue  # No client yet, keep waiting
 
             try:
                 frame_count = 0
@@ -145,6 +188,13 @@ def stream_camera(camera_name, port, quality):
 
     finally:
         server_sock.close()
+        # Stop camerad if we started it
+        if not camerad_running and not PC:
+            print("Stopping camerad...")
+            try:
+                managed_processes['camerad'].stop()
+            except Exception as e:
+                print(f"Warning: Could not stop camerad: {e}")
         print("Server stopped")
 
 
