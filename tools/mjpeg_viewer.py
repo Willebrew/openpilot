@@ -298,6 +298,9 @@ def stream_mjpeg_viewer(base_url):
             url = viewer.get_url()
             print(f"Connecting to {url}...")
 
+            # Small delay to let previous connection close properly
+            time.sleep(0.1)
+
             try:
                 # Connect to stream
                 response = requests.get(url, stream=True, timeout=5)
@@ -316,6 +319,7 @@ def stream_mjpeg_viewer(base_url):
                 for chunk in response.iter_content(chunk_size=4096):
                     if viewer.should_switch:
                         print(f"Switching to {viewer.current_camera} camera...")
+                        response.close()  # Explicitly close connection before switching
                         break
 
                     bytes_buffer += chunk
