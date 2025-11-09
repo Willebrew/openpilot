@@ -132,19 +132,39 @@ def stream_mjpeg(port, quality, target_fps):
             managed_processes['camerad'].start()
             time.sleep(2)
 
-    # Check if modeld is already running (e.g., while driving)
-    # We don't start it ourselves to avoid core affinity issues
+    # Check if modeld is already running, otherwise start it
     modeld_running = False
     modeld_available = False
     try:
         subprocess.check_call(["pgrep", "modeld"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         modeld_running = True
         modeld_available = True
-        print("modeld is running - model overlays will be available")
+        print("modeld already running - model overlays will be available")
     except subprocess.CalledProcessError:
-        print("modeld not running - model overlays disabled")
-        print("(Model overlays only available while driving/when modeld is running)")
-        modeld_available = False
+        print("Starting modeld for model overlays...")
+        if not PC:
+            # Enable big CPU cores (4-7) so modeld can run on core 7
+            print("Enabling big CPU cores...")
+            for i in range(4, 8):
+                try:
+                    with open(f'/sys/devices/system/cpu/cpu{i}/online', 'w') as f:
+                        f.write('1\n')
+                except:
+                    pass  # Already online or permission issue
+
+            try:
+                managed_processes['modeld'].start()
+                time.sleep(3)
+                # Verify it started successfully
+                subprocess.check_call(["pgrep", "modeld"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                modeld_available = True
+                print("modeld started successfully!")
+            except Exception as e:
+                print(f"Warning: Could not start modeld: {e}")
+                print("Streaming without model overlays")
+                modeld_available = False
+        else:
+            print("Streaming without model overlays (PC mode)")
 
     # Setup VisionIPC clients for all cameras
     vipc_clients = {}
@@ -202,6 +222,9 @@ def stream_mjpeg(port, quality, target_fps):
         while True:
             client_sock, addr = server_sock.accept()
 
+            # Set socket timeout for reading HTTP request
+            client_sock.settimeout(2.0)
+
             # Read HTTP request to get camera parameter
             try:
                 request = client_sock.recv(1024).decode('utf-8', errors='ignore')
@@ -214,24 +237,28 @@ def stream_mjpeg(port, quality, target_fps):
                     camera_name = 'road'
 
                 print(f"\nClient connected from {addr} - Camera: {camera_name}")
-            except:
+            except Exception as e:
                 camera_name = 'road'
-                print(f"\nClient connected from {addr} - Default camera: {camera_name}")
+                print(f"\nClient connected from {addr} - Default camera: {camera_name} (parse error: {e})")
 
             # Get the VisionIPC client for selected camera
             vipc_client = vipc_clients[camera_name]
+
+            # Remove timeout for streaming
+            client_sock.settimeout(None)
 
             # Send HTTP headers for multipart stream (JPEG + JSON)
             headers = (
                 b"HTTP/1.1 200 OK\r\n"
                 b"Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
                 b"Cache-Control: no-cache\r\n"
-                b"Connection: close\r\n"
+                b"Connection: keep-alive\r\n"
                 b"\r\n"
             )
             try:
                 client_sock.sendall(headers)
-            except:
+            except Exception as e:
+                print(f"Failed to send headers: {e}")
                 client_sock.close()
                 continue
 
@@ -267,9 +294,14 @@ def stream_mjpeg(port, quality, target_fps):
                     _, jpeg = cv2.imencode('.jpg', bgr, encode_params)
                     jpeg_bytes = jpeg.tobytes()
 
-                    # Extract model data
-                    model_data = extract_model_data(sm)
-                    model_json = json.dumps(model_data).encode('utf-8')
+                    # Extract model data if available
+                    model_json = b'{}'
+                    if modeld_available:
+                        try:
+                            model_data = extract_model_data(sm)
+                            model_json = json.dumps(model_data).encode('utf-8')
+                        except:
+                            model_json = b'{}'
 
                     # Send multipart frame with both image and model data
                     frame_header = (
